@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\ubuntu\\\\\\\\home\\\\\\\\morosev\\\\\\\\mec-cast-logging-service\" 2>/dev/null || ls -la /home/morosev/mec-cast-logging-service)",
+      "Read(///wsl.localhost/ubuntu/home/morosev/mec-cast-logging-service/**)",
+      "Bash(python -m venv venv)",
+      "Bash(./venv/Scripts/python.exe -m pip install -q --upgrade pip)",
+      "Bash(./venv/Scripts/python.exe -m pip install -q fastapi \"uvicorn[standard]\" asyncpg pydantic pydantic-settings pytest pytest-asyncio httpx ruff)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(python -c \"import fastapi, pydantic, asyncpg\")",
+      "Bash(docker --version)",
+      "Bash(where.exe psql *)",
+      "Bash(wsl.exe -d ubuntu -- bash -lc \"command -v psql pg_ctlcluster postgres docker 2>/dev/null; ls /etc/postgresql 2>/dev/null; echo done\")"
+    ]
+  }
+}
