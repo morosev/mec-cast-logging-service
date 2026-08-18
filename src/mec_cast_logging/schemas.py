@@ -126,6 +126,155 @@ class StatsResponse(BaseModel):
     by_service: list[ServiceCount]
 
 
+METRIC_NAMES: tuple[str, ...] = ("e2e", "network", "processing", "sender")
+
+
+class MetricSummary(BaseModel):
+    """One derived metric, summarised over a whole session.
+
+    Percentiles cannot be averaged across windows, so the honest summary
+    reports the *typical* window (median of that window's percentile) and the
+    *worst* window separately. ``min_ns``/``max_ns``/``mean_ns`` are exact for
+    the session: extremes compose, and the mean is count-weighted.
+    """
+
+    windows: int = Field(description="Snapshot windows that reported this metric.")
+    samples: int = Field(description="Frames summarised, across all windows.")
+    min_ns: int
+    max_ns: int
+    mean_ns: float = Field(description="Count-weighted mean. Exact for the session.")
+    stddev_ns: float = Field(description="Pooled: within-window variance plus spread of means.")
+    p50_typical_ns: int = Field(description="Median across windows of that window's p50.")
+    p90_typical_ns: int
+    p99_typical_ns: int
+    p99_worst_ns: int = Field(description="Worst single window's p99.")
+
+
+class ServiceStats(BaseModel):
+    """Per-service accounting. Sequence numbers are per-recorder, so frame
+    loss only means anything within one service."""
+
+    service: str
+    host: str | None
+    windows: int
+    rows_written: int = Field(description="Frames the recorder wrote.")
+    samples_dropped: int = Field(description="Frames the recorder dropped: its ring was full.")
+    snapshots_dropped: int
+    seq_first: int | None
+    seq_last: int | None
+    frames_expected: int | None = Field(
+        default=None, description="seq_last - seq_first + 1, when both are known."
+    )
+    frames_missing: int | None = Field(
+        default=None,
+        description="Expected minus written: frames that never reached the recorder at all.",
+    )
+
+
+class PtpSummary(BaseModel):
+    """Whether cross-host timing can be trusted at all.
+
+    ``e2e`` and ``network`` are differences between clocks on two hosts, so
+    they measure clock offset rather than latency when PTP is not locked.
+    """
+
+    windows: int
+    reliable_windows: int
+    reliable_pct: float
+    max_abs_offset_ns: int | None
+    trustworthy: bool = Field(description="True when every window reported a reliable lock.")
+
+
+class BudgetSplit(BaseModel):
+    """Where the glass-to-glass time goes, as a share of the e2e mean.
+
+    ``unaccounted_ns`` is e2e minus the three parts. It is not waste: the
+    parts come from independent windows and PTP offset lands here too, so
+    treat a small residual as noise and a large one as a clock problem.
+    """
+
+    sender_ns: float
+    network_ns: float
+    processing_ns: float
+    unaccounted_ns: float
+    total_ns: float
+
+
+class SessionSummary(BaseModel):
+    """One row in the session picker."""
+
+    trace_id: str
+    started_at: datetime
+    ended_at: datetime
+    duration_s: float
+    windows: int
+    services: list[str]
+    hosts: list[str]
+    rows_written: int
+    samples_dropped: int
+    ptp_reliable_pct: float
+    e2e_p50_typical_ns: int | None = None
+    e2e_p99_worst_ns: int | None = None
+
+
+class SessionList(BaseModel):
+    since: datetime
+    until: datetime
+    count: int
+    items: list[SessionSummary]
+
+
+class SessionDetail(BaseModel):
+    """Everything the dashboard shows above the charts."""
+
+    trace_id: str
+    started_at: datetime
+    ended_at: datetime
+    duration_s: float
+    windows: int
+    services: list[str]
+    hosts: list[str]
+    interval_s: float | None
+    metrics: dict[str, MetricSummary]
+    by_service: list[ServiceStats]
+    ptp: PtpSummary
+    budget: BudgetSplit | None
+    effective_rate_hz: float | None
+    slo_threshold_ns: int
+    slo_compliance_pct: float | None = Field(
+        default=None, description="Share of windows whose p99 sits under the threshold."
+    )
+    p99_drift_ns_per_min: float | None = Field(
+        default=None, description="Least-squares slope of window p99 over the session."
+    )
+
+
+class SessionTimeseries(BaseModel):
+    """Columnar series, shaped for charting directly.
+
+    Every list has the same length as ``t``. Nulls mark windows where a
+    metric was absent rather than zero.
+    """
+
+    trace_id: str
+    t: list[float] = Field(description="Unix seconds, ascending.")
+    elapsed_s: list[float] = Field(description="Seconds since the session started.")
+    service: list[str]
+    e2e_p50_ns: list[float | None]
+    e2e_p90_ns: list[float | None]
+    e2e_p99_ns: list[float | None]
+    e2e_mean_ns: list[float | None]
+    e2e_min_ns: list[float | None]
+    e2e_max_ns: list[float | None]
+    sender_mean_ns: list[float | None]
+    network_mean_ns: list[float | None]
+    processing_mean_ns: list[float | None]
+    ptp_offset_ns: list[float | None]
+    ptp_reliable: list[bool]
+    samples_delta: list[int]
+    rows_written: list[int]
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str

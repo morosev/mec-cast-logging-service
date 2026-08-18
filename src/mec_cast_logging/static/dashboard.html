@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mec-cast · telemetry</title>
+<link rel="stylesheet" href="/static/vendor/uPlot.min.css">
+<link rel="stylesheet" href="/static/dashboard.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>📡</text></svg>">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="brand">
+      <h1>Glass-to-glass telemetry</h1>
+      <p id="sessionCaption">Pick a session to begin.</p>
+    </div>
+
+    <div class="controls">
+      <div class="field">
+        <label for="period">Period</label>
+        <select id="period">
+          <option value="1">Last 24 hours</option>
+          <option value="7" selected>Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="custom">Custom…</option>
+        </select>
+      </div>
+      <div class="field hidden" id="customFrom">
+        <label for="fromAt">From</label>
+        <input type="datetime-local" id="fromAt">
+      </div>
+      <div class="field hidden" id="customTo">
+        <label for="toAt">To</label>
+        <input type="datetime-local" id="toAt">
+      </div>
+      <div class="field">
+        <label for="session">Session</label>
+        <select id="session"><option>Loading…</option></select>
+      </div>
+      <div class="field">
+        <label for="slo">Budget</label>
+        <select id="slo">
+          <option value="20">20 ms</option>
+          <option value="50">50 ms</option>
+          <option value="100" selected>100 ms</option>
+          <option value="200">200 ms</option>
+          <option value="500">500 ms</option>
+        </select>
+      </div>
+      <button id="reload" class="primary" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <div id="ptpBanner" class="banner bad hidden"></div>
+  <div id="error" class="banner bad hidden"></div>
+
+  <div id="empty" class="empty hidden">
+    No measurement sessions in this period. Run one with
+    <code>bash scripts/run-experiment.sh</code>, then refresh.
+  </div>
+
+  <main id="content" class="hidden">
+
+    <!-- verdict strip -->
+    <section class="verdict">
+      <div class="card">
+        <h2>Verdict</h2>
+        <div class="weather">
+          <div class="glyph" id="weatherGlyph">—</div>
+          <div>
+            <div class="word" id="weatherWord">—</div>
+            <div class="sub" id="weatherSub"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>p99 vs budget</h2>
+        <svg id="gauge" class="chart" viewBox="0 0 200 118" role="img" aria-label="p99 against budget"></svg>
+      </div>
+
+      <div class="card">
+        <h2>Headline</h2>
+        <div class="kpis" id="kpis"></div>
+        <div class="trophies" id="trophies" style="margin-top:14px"></div>
+      </div>
+    </section>
+
+    <!-- glass to glass over time -->
+    <section class="card" style="margin-bottom:18px">
+      <h2>Glass-to-glass over the session <span class="badge muted" id="g2gWindows"></span></h2>
+      <div id="g2gChart" class="chart"></div>
+      <p class="hint">
+        Each point is one snapshot window (default 2 s), not one frame. The band is that
+        window's min-to-max spread; the lines are its percentiles.
+      </p>
+    </section>
+
+    <!-- budget -->
+    <div class="grid-2">
+      <section class="card">
+        <h2>Where the time goes</h2>
+        <div id="budgetChart" class="chart"></div>
+        <div class="legend" id="budgetLegend"></div>
+      </section>
+
+      <section class="card">
+        <h2>Latency budget split</h2>
+        <svg id="donut" class="chart" viewBox="0 0 320 200" role="img" aria-label="latency budget split"></svg>
+        <p class="hint" id="donutHint"></p>
+      </section>
+    </div>
+
+    <!-- distribution + ptp -->
+    <div class="grid-2">
+      <section class="card">
+        <h2>Distribution of window p50 <span class="badge muted">per-window</span></h2>
+        <svg id="histogram" class="chart" viewBox="0 0 640 240" role="img" aria-label="histogram of window medians"></svg>
+        <p class="hint">
+          The database stores 2-second aggregates, never individual frames, so this counts
+          <em>windows</em>, not frames. A true per-frame histogram needs
+          <code>runs/$RUN_ID/*/samples.csv</code>.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>PTP offset &amp; clock trust</h2>
+        <div id="ptpChart" class="chart"></div>
+        <p class="hint" id="ptpHint"></p>
+      </section>
+    </div>
+
+    <!-- frame health -->
+    <section class="card" style="margin-bottom:18px">
+      <h2>Frame health <span class="badge muted" id="dropSummary"></span></h2>
+      <svg id="barcode" class="chart" viewBox="0 0 1000 64" preserveAspectRatio="none"
+           role="img" aria-label="dropped frames per window"></svg>
+      <p class="hint">
+        One stripe per window. Brighter means more frames dropped in that window because the
+        recorder's ring was full. Frames that never reached the recorder at all leave no stripe —
+        they show as <em>missing</em> in per-service accounting.
+      </p>
+    </section>
+
+    <!-- tables -->
+    <div class="grid-2">
+      <section class="card">
+        <h2>Metric statistics</h2>
+        <table id="metricsTable">
+          <thead>
+            <tr>
+              <th>Metric</th><th>Frames</th><th>Mean</th><th>Jitter</th>
+              <th>p50<span class="dim">*</span></th><th>p90<span class="dim">*</span></th>
+              <th>p99<span class="dim">*</span></th><th>Worst p99</th><th>Max</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="hint">
+          <span class="dim">*</span> Percentiles cannot be averaged across windows, so these are
+          the <em>typical</em> window (median of that window's value). Mean, max and frame counts
+          are exact for the session.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Per-service accounting</h2>
+        <table id="serviceTable">
+          <thead>
+            <tr>
+              <th>Service</th><th>Windows</th><th>Written</th>
+              <th>Dropped</th><th>Missing</th><th>Loss</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="hint">
+          <em>Dropped</em> — the recorder's ring was full. <em>Missing</em> — sequence numbers
+          that never arrived at all. Sequence numbers are per recorder, so these only compare
+          within one service.
+        </p>
+      </section>
+    </div>
+
+    <!-- hall of shame -->
+    <section class="card">
+      <h2>Hall of shame <span class="badge muted">worst windows</span></h2>
+      <table id="shameTable">
+        <thead>
+          <tr><th>#</th><th>At</th><th>Elapsed</th><th>p99</th><th>Max</th><th>Dropped</th><th>PTP</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+  </main>
+
+  <footer>
+    Served by the mec-cast logging service · charts by
+    <a href="/static/vendor/uPlot.LICENSE" style="color:var(--text-muted)">uPlot</a> (MIT), vendored
+    for offline use · <a href="/docs" style="color:var(--text-muted)">API docs</a>
+  </footer>
+
+</div>
+
+<script src="/static/vendor/uPlot.iife.min.js"></script>
+<script src="/static/dashboard.js"></script>
+</body>
+</html>

@@ -18,13 +18,19 @@ from .schemas import (
     LogEntryCreate,
     LogLevel,
     LogPage,
+    SessionDetail,
+    SessionList,
+    SessionSummary,
+    SessionTimeseries,
     StatsResponse,
     decode_cursor,
     encode_cursor,
 )
+from .sessions import DEFAULT_SLO_NS, build_session_detail, build_timeseries
 
 health_router = APIRouter(tags=["health"])
 logs_router = APIRouter(tags=["logs"])
+sessions_router = APIRouter(tags=["sessions"])
 
 
 @health_router.get("/health", response_model=HealthResponse)
@@ -173,6 +179,91 @@ async def stats(
         by_level=by_level,
         by_service=by_service,
     )
+
+
+@sessions_router.get(
+    "/sessions",
+    response_model=SessionList,
+    summary="Measurement sessions in a time window",
+)
+async def list_sessions(
+    repository: RepositoryDep,
+    since: Annotated[datetime | None, Query(description="Defaults to 7 days ago.")] = None,
+    until: Annotated[datetime | None, Query(description="Defaults to now.")] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> SessionList:
+    """List sessions newest first, for the picker.
+
+    A session is one ``trace_id`` (the run's ``RUN_ID``) that carries
+    telemetry snapshots; ordinary log lines are ignored.
+    """
+    window_end = _as_utc(until) or datetime.now(UTC)
+    window_start = _as_utc(since) or window_end - timedelta(days=7)
+    if window_start > window_end:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="`since` must not be after `until`.",
+        )
+
+    rows = await repository.list_sessions(since=window_start, until=window_end, limit=limit)
+    items = [
+        SessionSummary(
+            trace_id=row["trace_id"],
+            started_at=row["started_at"],
+            ended_at=row["ended_at"],
+            duration_s=(row["ended_at"] - row["started_at"]).total_seconds(),
+            windows=row["windows"],
+            services=sorted(row["services"] or []),
+            hosts=sorted(row["hosts"] or []),
+            rows_written=row["rows_written"] or 0,
+            samples_dropped=row["samples_dropped"] or 0,
+            ptp_reliable_pct=(
+                100.0 * row["reliable_windows"] / row["windows"] if row["windows"] else 0.0
+            ),
+            e2e_p50_typical_ns=row["e2e_p50_typical"],
+            e2e_p99_worst_ns=row["e2e_p99_worst"],
+        )
+        for row in rows
+    ]
+    return SessionList(
+        since=window_start, until=window_end, count=len(items), items=items
+    )
+
+
+@sessions_router.get(
+    "/sessions/{trace_id}",
+    response_model=SessionDetail,
+    summary="Aggregate statistics for one session",
+)
+async def session_detail(
+    trace_id: str,
+    repository: RepositoryDep,
+    slo_ms: Annotated[
+        float, Query(gt=0, description="Glass-to-glass budget for the compliance figure.")
+    ] = DEFAULT_SLO_NS / 1_000_000,
+) -> SessionDetail:
+    rows = await repository.session_windows(trace_id)
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No telemetry snapshots for session {trace_id!r}.",
+        )
+    return build_session_detail(trace_id, rows, slo_threshold_ns=int(slo_ms * 1_000_000))
+
+
+@sessions_router.get(
+    "/sessions/{trace_id}/timeseries",
+    response_model=SessionTimeseries,
+    summary="Per-window series for one session, shaped for charting",
+)
+async def session_timeseries(trace_id: str, repository: RepositoryDep) -> SessionTimeseries:
+    rows = await repository.session_windows(trace_id)
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No telemetry snapshots for session {trace_id!r}.",
+        )
+    return build_timeseries(trace_id, rows)
 
 
 def _as_utc(value: datetime | None) -> datetime | None:

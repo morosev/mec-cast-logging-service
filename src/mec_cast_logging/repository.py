@@ -175,6 +175,65 @@ class LogRepository:
         total = sum(item.count for item in by_level)
         return total, by_level, by_service
 
+    async def list_sessions(
+        self,
+        since: datetime,
+        until: datetime,
+        limit: int = 100,
+    ) -> list[asyncpg.Record]:
+        """One row per measurement session overlapping the window, newest first.
+
+        A session is the set of telemetry snapshots sharing a ``trace_id``.
+        ``context ? 'metrics'`` is what separates those from ordinary logs,
+        and it uses the existing GIN index on ``context``.
+        """
+        query = """
+            SELECT
+                trace_id,
+                min("timestamp")                         AS started_at,
+                max("timestamp")                         AS ended_at,
+                count(*)                                 AS windows,
+                array_agg(DISTINCT service)              AS services,
+                array_agg(DISTINCT host)
+                    FILTER (WHERE host IS NOT NULL)      AS hosts,
+                count(*) FILTER (
+                    WHERE context->'ptp'->>'reliable' = 'true'
+                )                                        AS reliable_windows,
+                max((context->>'rows_written')::bigint)  AS rows_written,
+                max((context->'drops'->>'samples_total')::bigint) AS samples_dropped,
+                max((context->'metrics'->'e2e'->>'p99_ns')::bigint) AS e2e_p99_worst,
+                percentile_disc(0.5) WITHIN GROUP (
+                    ORDER BY (context->'metrics'->'e2e'->>'p50_ns')::bigint
+                )                                        AS e2e_p50_typical
+            FROM log_entries
+            WHERE trace_id IS NOT NULL
+              AND context ? 'metrics'
+              AND "timestamp" >= $1
+              AND "timestamp" <= $2
+            GROUP BY trace_id
+            ORDER BY started_at DESC
+            LIMIT $3
+        """
+        async with self._pool.acquire() as connection:
+            return await connection.fetch(query, since, until, limit)
+
+    async def session_windows(self, trace_id: str) -> list[asyncpg.Record]:
+        """Every telemetry snapshot for one session, oldest first.
+
+        Returned whole so the caller can aggregate in Python: percentiles need
+        care that is clearer outside SQL, and one session is a bounded number
+        of rows (a 10-minute run at the 2 s default is 300).
+        """
+        query = """
+            SELECT "timestamp", service, host, context
+            FROM log_entries
+            WHERE trace_id = $1
+              AND context ? 'metrics'
+            ORDER BY "timestamp" ASC, id ASC
+        """
+        async with self._pool.acquire() as connection:
+            return await connection.fetch(query, trace_id)
+
     async def count_before(self, before: datetime) -> int:
         """Count entries older than ``before``."""
         async with self._pool.acquire() as connection:

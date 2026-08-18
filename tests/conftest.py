@@ -2,8 +2,15 @@
 
 Integration tests need a reachable PostgreSQL. Point `MECLOG_TEST_DATABASE_URL`
 (or `MECLOG_DATABASE_URL`) at a throwaway database; the whole integration module
-is skipped when neither is reachable. Every test runs inside a transaction that
-is rolled back, so the database is left as it was found.
+is skipped when neither is reachable.
+
+**These tests destroy data.** The `database` fixture runs
+`TRUNCATE log_entries` after every test, so every row in the target database is
+deleted — not just the rows a test created. Never point either variable at a
+database whose contents you want to keep, including the dev topology's
+`mec_cast_logs`. Create a scratch database instead:
+
+    createdb mec_cast_logs_test    # or: CREATE DATABASE mec_cast_logs_test;
 """
 
 from __future__ import annotations

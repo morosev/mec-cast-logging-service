@@ -5,17 +5,21 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import asyncpg
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import health_router, logs_router
+from .api import health_router, logs_router, sessions_router
 from .config import Settings, get_settings
 from .db import Database
 
 logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -53,6 +57,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(logs_router, prefix=settings.api_prefix)
+    app.include_router(sessions_router, prefix=settings.api_prefix)
+
+    # The dashboard is plain files plus a vendored chart library: no build
+    # step, and nothing fetched at runtime, so it works in an air-gapped lab.
+    if STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+        @app.get("/dashboard", include_in_schema=False)
+        async def dashboard() -> FileResponse:
+            return FileResponse(STATIC_DIR / "dashboard.html")
+
+        @app.get("/", include_in_schema=False)
+        async def index() -> RedirectResponse:
+            return RedirectResponse(url="/dashboard")
+    else:
+        logger.warning("static assets missing at %s; dashboard disabled", STATIC_DIR)
 
     @app.exception_handler(asyncpg.PostgresError)
     async def _database_error(request: Request, exc: asyncpg.PostgresError) -> JSONResponse:
