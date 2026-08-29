@@ -710,11 +710,58 @@ function showError(message) {
   box.classList.remove('hidden');
 }
 
+/** A run id passed in the URL, so the admin page can link straight here.
+ *  Consumed once: after the first load the picker owns the selection, and a
+ *  stale query string must not fight the operator's next choice. */
+function requestedRun() {
+  const asked = new URLSearchParams(location.search).get('run');
+  return asked && asked.trim() ? asked.trim() : null;
+}
+
 async function refreshAll() {
   $('error').classList.add('hidden');
   try {
-    const first = await loadSessions();
-    if (first) await loadSession(first);
+    const newest = await loadSessions();
+    const asked = requestedRun();
+    if (!asked) {
+      if (newest) await loadSession(newest);
+      return;
+    }
+
+    // The requested run may be outside the selected period, in which case it
+    // is not in the picker. Loading it anyway is the honest answer — the
+    // alternative is silently showing a different session than the link
+    // asked for — but the picker has to say so, or the caption and the
+    // dropdown disagree about what is on screen.
+    const picker = $('session');
+    const known = [...picker.options].some((o) => o.value === asked);
+    if (!known) {
+      const option = document.createElement('option');
+      option.value = asked;
+      option.textContent = `${asked.slice(0, 8)} · outside this period`;
+      picker.insertBefore(option, picker.firstChild);
+    }
+    picker.value = asked;
+    $('empty').classList.add('hidden');
+    $('content').classList.remove('hidden');
+    try {
+      await loadSession(asked);
+    } catch (err) {
+      // A linked run with no telemetry is an ordinary outcome, not a fault:
+      // a run created and never started, or stopped inside its first
+      // snapshot interval, has no windows to chart. Say that, rather than
+      // "could not load sessions" — the sessions loaded fine.
+      showError(
+        `Run ${asked.slice(0, 8)} has no telemetry yet — it may not have run ` +
+        `long enough to report a window. Pick another session above.`);
+      if (newest && newest !== asked) {
+        // Move the picker with the content. Leaving it on the failed run
+        // while the charts show a different one is the exact mismatch this
+        // branch exists to avoid.
+        picker.value = newest;
+        await loadSession(newest);
+      }
+    }
   } catch (err) {
     showError(`Could not load sessions: ${err.message}`);
   }
@@ -738,6 +785,83 @@ $('session').addEventListener('change', async (event) => {
 
 $('slo').addEventListener('change', () => {
   if (state.detail) loadSession(state.detail.trace_id).catch((e) => showError(e.message));
+});
+
+/* ── auto refresh ───────────────────────────────────────────────────────
+   Off by default: this page is read while someone reasons about a run, and
+   a view that moves under them is worse than one they refresh themselves. */
+
+const REFRESH_MS = 5000;
+let refreshTimer = null;
+let refreshInFlight = false;
+
+/** Reload the list, the table and the charts without disturbing the choice
+ *  the operator made. `loadSessions` rebuilds the picker from scratch and
+ *  returns the newest session, so the current selection has to be put back
+ *  or every tick would drag the view to the newest run. */
+async function autoTick() {
+  // A query slower than the interval must not stack requests on the server.
+  if (refreshInFlight) return;
+  const picker = $('session');
+  const picked = picker.value;
+  refreshInFlight = true;
+  try {
+    await loadSessions();
+    if (picked) {
+      const known = [...picker.options].some((o) => o.value === picked);
+      if (!known) {
+        // The session aged out of the window while being watched. Keep it
+        // rather than jumping elsewhere; the label says why it is unusual.
+        const option = document.createElement('option');
+        option.value = picked;
+        option.textContent = `${picked.slice(0, 8)} · outside this period`;
+        picker.insertBefore(option, picker.firstChild);
+      }
+      picker.value = picked;
+      $('empty').classList.add('hidden');
+      $('content').classList.remove('hidden');
+      await loadSession(picked);
+    }
+    $('error').classList.add('hidden');
+    markRefreshed();
+  } catch (err) {
+    // Do not switch the toggle off: a single failed poll on a busy database
+    // is not a reason to stop watching. Say so and try again next tick.
+    showError(`Auto refresh failed: ${err.message} — retrying in 5 s.`);
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+function markRefreshed() {
+  if (!$('autoRefresh').checked) return;
+  const t = new Date();
+  $('autoRefreshText').textContent =
+    `on · ${String(t.getHours()).padStart(2, '0')}:` +
+    `${String(t.getMinutes()).padStart(2, '0')}:` +
+    `${String(t.getSeconds()).padStart(2, '0')}`;
+}
+
+function setAutoRefresh(on) {
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+  if (!on) {
+    $('autoRefreshText').textContent = 'off';
+    return;
+  }
+  $('autoRefreshText').textContent = 'on';
+  autoTick();                       // act on the click, do not wait 5 s
+  refreshTimer = setInterval(autoTick, REFRESH_MS);
+}
+
+$('autoRefresh').addEventListener('change', (e) => setAutoRefresh(e.target.checked));
+
+// A hidden tab polls for nobody. Browsers throttle background timers anyway,
+// so this makes the behaviour deliberate instead of implementation-defined.
+document.addEventListener('visibilitychange', () => {
+  if (!$('autoRefresh').checked) return;
+  setAutoRefresh(!document.hidden);
+  $('autoRefresh').checked = true;
 });
 
 $('reload').addEventListener('click', refreshAll);
