@@ -58,14 +58,23 @@ uvicorn mec_cast_logging.app:app --host 0.0.0.0 --port 8000 --workers 4
 
 Base path is `/api/v1`. Health endpoints sit at the root.
 
-| Method | Path                 | Purpose                                    |
-| ------ | -------------------- | ------------------------------------------ |
-| POST   | `/api/v1/logs`       | Ingest one entry or a batch                |
-| GET    | `/api/v1/logs`       | Query entries, newest first                |
-| GET    | `/api/v1/logs/{id}`  | Fetch a single entry                       |
-| GET    | `/api/v1/stats`      | Counts by level and service over a window  |
-| GET    | `/health`            | Liveness — does not touch the database     |
-| GET    | `/health/ready`      | Readiness — 503 when the database is down  |
+| Method | Path                                       | Purpose                                    |
+| ------ | ------------------------------------------ | ------------------------------------------ |
+| POST   | `/api/v1/logs`                             | Ingest one entry or a batch                |
+| GET    | `/api/v1/logs`                             | Query entries, newest first                |
+| GET    | `/api/v1/logs/{id}`                        | Fetch a single entry                       |
+| GET    | `/api/v1/stats`                            | Counts by level and service over a window  |
+| GET    | `/api/v1/sessions`                         | Measurement sessions in a time window      |
+| GET    | `/api/v1/sessions/{trace_id}`              | Aggregate statistics for one session       |
+| GET    | `/api/v1/sessions/{trace_id}/timeseries`   | Per-window columns for the charts          |
+| GET    | `/dashboard`                               | The web dashboard (see below)              |
+| GET    | `/`                                        | Redirects to `/dashboard`                  |
+| GET    | `/health`                                  | Liveness — does not touch the database     |
+| GET    | `/health/ready`                            | Readiness — 503 when the database is down  |
+
+A **session** is one `trace_id` carrying telemetry snapshots — that is, one
+measurement run. Ordinary log lines are ignored: what separates the two is
+`context ? 'metrics'`, which the GIN index on `context` already covers.
 
 ### Ingesting
 
@@ -141,6 +150,32 @@ pass it back as `cursor` for the following page:
 Paging is keyset-based on `(timestamp, id)`, so rows arriving mid-walk never cause skips or
 duplicates the way an `OFFSET` would.
 
+## Dashboard
+
+`/dashboard` is a plain-file page — no build step, no framework, a vendored
+chart library — served only when the static assets are present. It reads the
+three `/sessions` endpoints and nothing else.
+
+**Period** selects the window, defaulting to the last 30 days: 24 hours,
+7 days, 30, 90, **All time**, or a custom range. All time is bounded only by
+what retention has kept, so it is the one to reach for when a run is missing
+from the list. The picker holds the newest 500 sessions and says so when the
+window contains more.
+
+A session can be opened directly:
+
+```
+/dashboard?run=<trace_id>
+```
+
+The run id *is* the `trace_id`, so one query covers every component that
+reported under it — client, edge, renderer and RAN. The admin service links
+here per run. A requested session outside the selected period is still loaded
+and marked in the picker, rather than silently showing a different one.
+
+A run absent from *every* period was never recorded rather than aged out:
+components post only when their `LOGGING_URL` is set.
+
 ## Retention
 
 Nothing is deleted automatically. Trim old entries with:
@@ -198,13 +233,22 @@ src/mec_cast_logging/
   schemas.py       Request/response models, cursor encoding
   repository.py    All SQL
   db.py            Connection pool and migration runner
+  sessions.py      Session aggregation and window statistics
   config.py        Settings
+  dependencies.py  Shared FastAPI dependencies
   cli.py           serve / migrate / purge
   migrations/      Ordered .sql files, applied once and recorded
+  static/          The dashboard: html, css, js, and a vendored chart library
 tests/
 ```
 
 ## Not included yet
 
-Deliberately out of scope for this first cut: authentication, rate limiting, a web UI, and
-non-HTTP ingestion (syslog, message queues). Add them when a caller needs them.
+Deliberately out of scope: authentication, rate limiting, and non-HTTP ingestion
+(syslog, message queues). Add them when a caller needs them.
+
+A read-only web UI *is* included now — see [Dashboard](#dashboard) — and it inherits the
+service's posture rather than changing it: no login, no rate limit. Anyone who can reach
+the port can read every session through it, so bind the service to a management network
+only. Ingestion and querying were already unauthenticated; the dashboard makes that
+reachable from a browser, which is the practical difference.

@@ -74,8 +74,22 @@ async function getJSON(url) {
   return response.json();
 }
 
+//: GET /sessions defaults `since` to 7 days ago when the parameter is left
+//: off, so "all time" cannot be expressed by omitting it. An explicit lower
+//: bound before any possible record says it instead. What comes back is
+//: everything retention has kept, which is what "all" can honestly mean.
+const EPOCH = '1970-01-01T00:00:00.000Z';
+
+//: The API caps `limit` at 500. Ask for the cap rather than a smaller number:
+//: over a long window the difference is between a truncated picker and a
+//: complete one, and the truncation is called out below when it happens.
+const SESSION_LIMIT = 500;
+
 function windowBounds() {
   const choice = $('period').value;
+  if (choice === 'all') {
+    return { since: EPOCH, until: new Date().toISOString() };
+  }
   if (choice === 'custom') {
     const from = $('fromAt').value;
     const to = $('toAt').value;
@@ -94,7 +108,7 @@ async function loadSessions() {
   const query = new URLSearchParams();
   if (since) query.set('since', since);
   if (until) query.set('until', until);
-  query.set('limit', '200');
+  query.set('limit', String(SESSION_LIMIT));
 
   const data = await getJSON(`${API}/sessions?${query}`);
   state.sessions = data.items;
@@ -105,7 +119,10 @@ async function loadSessions() {
     $('empty').classList.remove('hidden');
     $('content').classList.add('hidden');
     picker.innerHTML = '<option>No sessions</option>';
-    $('sessionCaption').textContent = 'No sessions in this period.';
+    $('sessionCaption').textContent =
+      $('period').value === 'all'
+        ? 'No sessions recorded. Nodes report only when LOGGING_URL is set.'
+        : 'No sessions in this period — try a longer one, or All time.';
     return null;
   }
   $('empty').classList.add('hidden');
@@ -118,6 +135,14 @@ async function loadSessions() {
       `${when(session.started_at)} · ${duration(session.duration_s)} · ${g2g} · ` +
       `${session.trace_id.slice(0, 8)}`;
     picker.appendChild(option);
+  }
+
+  if (data.items.length >= SESSION_LIMIT) {
+    const note = document.createElement('option');
+    note.disabled = true;
+    note.textContent =
+      `— newest ${SESSION_LIMIT} shown; narrow the period to reach older sessions —`;
+    picker.appendChild(note);
   }
   return data.items[0].trace_id;
 }
