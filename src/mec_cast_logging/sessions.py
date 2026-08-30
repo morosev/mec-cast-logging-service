@@ -189,6 +189,35 @@ def _budget(metrics: dict[str, MetricSummary]) -> BudgetSplit | None:
     )
 
 
+#: `e2e` is derived identically wherever it is recorded -- capture_ns to
+#: process_done_ns -- so it measures whatever leg the recording node closes.
+#: The edge closes the sending leg, lidar to edge, which is the platform's
+#: headline figure. The renderer closes the round trip, a different and much
+#: larger number. The publisher closes nothing and reports no e2e at all.
+#: Every component posts under one trace_id, so folding their windows together
+#: produced a figure that was neither leg.
+UPLINK_SERVICE = "mec-cast-edge"
+RETURN_SERVICE = "mec-cast-render"
+
+LEG_UPLINK = "uplink"
+LEG_RETURN = "return"
+LEG_SOURCE = "source"
+
+
+def leg_of(service: str) -> str:
+    """Which measurement leg a service's windows describe.
+
+    Node identities are ``<SERVICE>-<instance>`` and built in one place
+    (MecCastNode), so stripping a trailing instance number is enough.
+    """
+    base = service.rsplit("-", 1)[0] if service.rsplit("-", 1)[-1].isdigit() else service
+    if base == UPLINK_SERVICE:
+        return LEG_UPLINK
+    if base == RETURN_SERVICE:
+        return LEG_RETURN
+    return LEG_SOURCE
+
+
 def build_session_detail(
     trace_id: str,
     rows: Sequence[Any],
@@ -201,9 +230,18 @@ def build_session_detail(
     started_at, ended_at = timestamps[0], timestamps[-1]
     duration_s = (ended_at - started_at).total_seconds()
 
+    # The headline describes ONE leg. Prefer the sending leg -- that is the
+    # measurement -- and fall back to everything only when no edge reported,
+    # so a session from a partial topology still shows what it has rather
+    # than nothing.
+    legs = [leg_of(row["service"]) for row in rows]
+    uplink_contexts = [c for c, leg in zip(contexts, legs, strict=True) if leg == LEG_UPLINK]
+    primary_leg = LEG_UPLINK if uplink_contexts else None
+    headline = uplink_contexts or contexts
+
     metrics: dict[str, MetricSummary] = {}
     for name in METRIC_NAMES:
-        blocks = [block for context in contexts if (block := _metric(context, name)) is not None]
+        blocks = [block for context in headline if (block := _metric(context, name)) is not None]
         if (summary := summarise_metric(blocks)) is not None:
             metrics[name] = summary
 
@@ -262,8 +300,9 @@ def build_session_detail(
     elapsed = [(stamp - started_at).total_seconds() for stamp in timestamps]
     p99_pairs = [
         (seconds, value)
-        for seconds, context in zip(elapsed, contexts, strict=True)
-        if (block := _metric(context, "e2e")) is not None
+        for seconds, context, leg in zip(elapsed, contexts, legs, strict=True)
+        if (primary_leg is None or leg == primary_leg)
+        and (block := _metric(context, "e2e")) is not None
         and (value := _number(block.get("p99_ns"))) is not None
     ]
     drift = (
@@ -290,6 +329,7 @@ def build_session_detail(
         hosts=sorted({row["host"] for row in rows if row["host"]}),
         interval_s=intervals[0] if intervals else None,
         metrics=metrics,
+        primary_leg=primary_leg,
         by_service=by_service,
         ptp=ptp,
         budget=_budget(metrics),

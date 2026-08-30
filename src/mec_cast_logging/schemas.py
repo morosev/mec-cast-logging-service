@@ -236,6 +236,15 @@ class SessionDetail(BaseModel):
     hosts: list[str]
     interval_s: float | None
     metrics: dict[str, MetricSummary]
+    primary_leg: str | None = Field(
+        default=None,
+        description=(
+            "Which leg `metrics`, `budget`, `drift` and `slo_compliance_pct` "
+            "describe. 'uplink' is the sending leg, lidar to edge, and is the "
+            "headline measurement. Null means no edge reported and the figures "
+            "fall back to every service pooled."
+        ),
+    )
     by_service: list[ServiceStats]
     ptp: PtpSummary
     budget: BudgetSplit | None

@@ -244,3 +244,64 @@ class TestTimeseries:
             window(1, e2e=metric(1, 1), reliable=False),
         ]
         assert build_timeseries("run-1", rows).ptp_reliable == [True, False]
+
+
+class TestMeasurementLeg:
+    """The headline describes one leg, not all of them pooled.
+
+    `e2e` is derived identically wherever it is recorded -- capture_ns to
+    process_done_ns -- so it measures whatever leg the recording node closes.
+    The edge closes the sending leg, lidar to edge, which is the platform's
+    headline figure. The renderer closes the round trip, a much larger number.
+    Both post under one trace_id, so pooling them gave a figure that was
+    neither, and halved nothing: it silently averaged two measurements.
+    """
+
+    def test_headline_comes_from_the_sending_leg_alone(self):
+        rows = [
+            window(0, e2e=metric(10, 50_000_000), service="mec-cast-edge-0"),
+            window(0, e2e=metric(10, 900_000_000), service="mec-cast-render-0",
+                   host="ue-1"),
+            window(1, e2e=metric(10, 50_000_000), service="mec-cast-edge-0"),
+            window(1, e2e=metric(10, 900_000_000), service="mec-cast-render-0",
+                   host="ue-1"),
+        ]
+        detail = build_session_detail("run-1", rows)
+
+        assert detail.primary_leg == "uplink"
+        # 50 ms, not the 475 ms the two legs average to.
+        assert detail.metrics["e2e"].mean_ns == 50_000_000
+        assert detail.metrics["e2e"].windows == 2
+
+    def test_publisher_windows_do_not_dilute_it(self):
+        # The publisher stamps no process_done_ns, so it reports no e2e at
+        # all. Its windows counted against the total anyway, which is what
+        # made a healthy run read as a third of its windows missing.
+        rows = [
+            window(0, e2e=None, service="mec-cast-pub-0", host="ue-1"),
+            window(0, e2e=metric(10, 50_000_000), service="mec-cast-edge-0"),
+            window(1, e2e=None, service="mec-cast-pub-0", host="ue-1"),
+            window(1, e2e=metric(10, 50_000_000), service="mec-cast-edge-0"),
+        ]
+        detail = build_session_detail("run-1", rows)
+        assert detail.metrics["e2e"].windows == 2
+
+    def test_it_falls_back_when_no_edge_reported(self):
+        # A partial topology still shows what it has rather than nothing.
+        rows = [
+            window(0, e2e=metric(10, 900_000_000), service="mec-cast-render-0",
+                   host="ue-1"),
+        ]
+        detail = build_session_detail("run-1", rows)
+        assert detail.primary_leg is None
+        assert detail.metrics["e2e"].mean_ns == 900_000_000
+
+    def test_instance_number_does_not_change_the_leg(self):
+        rows = [
+            window(0, e2e=metric(10, 50_000_000), service="mec-cast-edge-11"),
+            window(0, e2e=metric(10, 900_000_000), service="mec-cast-render-3",
+                   host="ue-1"),
+        ]
+        detail = build_session_detail("run-1", rows)
+        assert detail.primary_leg == "uplink"
+        assert detail.metrics["e2e"].mean_ns == 50_000_000

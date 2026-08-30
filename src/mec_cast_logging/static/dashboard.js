@@ -395,6 +395,39 @@ const msAxis = (label) => ({
   labelFont: `11px ${css('--sans')}`,
 });
 
+//: Node identities are `<service>-<instance>`, built in one place by
+//: MecCastNode, so the trailing number strips cleanly.
+const UPLINK_SERVICE = 'mec-cast-edge';
+const RETURN_SERVICE = 'mec-cast-render';
+
+function legOf(service) {
+  const parts = String(service || '').split('-');
+  const base = /^\d+$/.test(parts[parts.length - 1]) ? parts.slice(0, -1).join('-') : service;
+  if (base === UPLINK_SERVICE) return 'uplink';
+  if (base === RETURN_SERVICE) return 'return';
+  return 'source';
+}
+
+/** Narrow the columnar series to the windows of one leg.
+ *
+ *  Every component posts under the same trace_id, so the raw series holds one
+ *  row per service per window: a publisher row reporting no e2e at all, an
+ *  edge row measuring the sending leg, a render row measuring the round trip.
+ *  Charted as one line that sawtooths between two different measurements with
+ *  a gap where the publisher sat, which is what made the panel look broken.
+ */
+function legSeries(series, leg) {
+  const keep = series.service.map((svc) => legOf(svc) === leg);
+  if (!keep.some(Boolean)) return null;
+  const pick = (column) =>
+    Array.isArray(column) ? column.filter((_, i) => keep[i]) : column;
+  const out = {};
+  for (const [key, value] of Object.entries(series)) out[key] = pick(value);
+  // elapsed_s is measured from the session start, which is the first row of
+  // ANY service; keeping it unshifted keeps the legs on one timeline.
+  return out;
+}
+
 function drawG2G(series, budgetMs) {
   const target = $('g2gChart');
   target.innerHTML = '';
@@ -459,10 +492,12 @@ function drawG2G(series, budgetMs) {
   state.charts.push(new uPlot(options, data, target));
 
   const badge = $('g2gWindows');
+  // Counted against this leg's own windows. The publisher reports no e2e by
+  // design, so including its rows made every healthy run look a third lost.
   const total = series.elapsed_s.length;
   badge.textContent = filled === total
-    ? `${total} windows`
-    : `${filled} of ${total} windows reported`;
+    ? `${total} windows · sending leg`
+    : `${filled} of ${total} windows reported · sending leg`;
   badge.className = `badge ${filled === total ? 'muted' : 'warn'}`;
 }
 
@@ -716,15 +751,20 @@ function render() {
     banner.classList.add('hidden');
   }
 
-  drawG2G(series, budgetNs / 1e6);
-  drawBudgetSeries(series);
+  // One leg per chart. The sending leg -- lidar to edge -- is the
+  // measurement; the return leg is informational and stays in the per-service
+  // table, which is the one place a whole-session comparison belongs.
+  const primary = legSeries(series, 'uplink') || series;
+
+  drawG2G(primary, budgetNs / 1e6);
+  drawBudgetSeries(primary);
   drawDonut(detail.budget);
-  drawHistogram(series.e2e_p50_ns);
-  drawPtp(series);
-  drawBarcode(series);
+  drawHistogram(primary.e2e_p50_ns);
+  drawPtp(primary);
+  drawBarcode(primary);
   fillMetrics(detail);
   fillServices(detail);
-  fillShame(series);
+  fillShame(primary);
 }
 
 /* ── wiring ─────────────────────────────────────────────────────────── */
