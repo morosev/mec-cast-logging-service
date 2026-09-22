@@ -163,11 +163,16 @@ class ServiceStats(BaseModel):
     seq_first: int | None
     seq_last: int | None
     frames_expected: int | None = Field(
-        default=None, description="seq_last - seq_first + 1, when both are known."
+        default=None,
+        description="seq_last - seq_first + 1, when both are known AND this "
+        "service's sequence has a single origin. None when several producers "
+        "share one seq space, where the span sets no expectation.",
     )
     frames_missing: int | None = Field(
         default=None,
-        description="Expected minus written: frames that never reached the recorder at all.",
+        description="Expected minus written: frames that never reached the "
+        "recorder at all. None when it cannot be computed -- no sequence, or "
+        "several concurrent producers numbering into the same service.",
     )
 
 

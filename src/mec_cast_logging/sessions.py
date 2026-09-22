@@ -267,7 +267,20 @@ def build_session_detail(
         seq_first = spans[0][0] if spans else None
         seq_last = spans[-1][1] if spans else None
         expected = sum(last - first + 1 for first, last in spans) if spans else None
-        missing = max(expected - rows_written, 0) if expected is not None else None
+        # More rows than the sequence span can account for means this service's
+        # seq space has SEVERAL CONCURRENT ORIGINS -- two lidar instances both
+        # numbering from zero into one edge, say. `_sequence_spans` splits a
+        # producer that restarts, because that is sequential; interleaved
+        # producers do not look like a reset and cannot be separated here.
+        #
+        # The old expression clamped to zero, so a merged service reported
+        # "no frames missing" with total confidence, which is worse than
+        # reporting nothing: it is the same answer a healthy service gives.
+        # None renders as an em dash, which the dashboard already handles.
+        if expected is None or rows_written > expected:
+            expected, missing = None, None
+        else:
+            missing = expected - rows_written
 
         by_service.append(
             ServiceStats(

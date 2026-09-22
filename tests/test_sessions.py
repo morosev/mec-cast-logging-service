@@ -120,6 +120,44 @@ class TestSessionDetail:
         assert service.frames_missing == 10
         assert service.samples_dropped == 4
 
+    def test_two_producers_in_one_seq_space_report_nothing_not_zero(self):
+        """An edge fed by two lidar instances cannot be measured this way.
+
+        Both producers number from zero into one service, so the span says
+        0..99 while 200 rows were written. The old expression clamped the
+        negative difference to zero and reported "no frames missing" with
+        total confidence -- the same answer a healthy service gives, which is
+        strictly worse than reporting nothing at all.
+        """
+        rows = [window(0, e2e=metric(200, 1_000_000), rows=200,
+                       seq_first=0, seq_last=99, dropped_total=0)]
+        detail = build_session_detail("run-1", rows)
+        service = detail.by_service[0]
+        assert service.rows_written == 200
+        assert service.frames_missing is None, (
+            "a merged seq space must not report a confident zero"
+        )
+        assert service.frames_expected is None, (
+            "the span sets no expectation when producers are interleaved"
+        )
+
+    def test_one_producer_is_unaffected(self):
+        """The common case must keep working, or the fix is a regression."""
+        rows = [window(0, e2e=metric(90, 1_000_000), rows=90,
+                       seq_first=0, seq_last=99, dropped_total=0)]
+        service = build_session_detail("run-1", rows).by_service[0]
+        assert service.frames_expected == 100
+        assert service.frames_missing == 10
+
+    def test_written_exactly_matching_the_span_is_still_zero(self):
+        """The boundary: equal is complete, not ambiguous. Only STRICTLY
+        more rows than the span imply several origins."""
+        rows = [window(0, e2e=metric(100, 1_000_000), rows=100,
+                       seq_first=0, seq_last=99, dropped_total=0)]
+        service = build_session_detail("run-1", rows).by_service[0]
+        assert service.frames_expected == 100
+        assert service.frames_missing == 0
+
     def test_cumulative_counters_take_the_last_value_not_the_sum(self):
         rows = [
             window(0, e2e=metric(10, 1e6), rows=10, dropped_total=1, seq_last=9),
