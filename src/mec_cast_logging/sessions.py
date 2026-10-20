@@ -25,8 +25,12 @@ from .schemas import (
     BudgetSplit,
     MetricSummary,
     PtpSummary,
+    RanControl,
+    RanSeries,
+    RanSource,
     ServiceStats,
     SessionDetail,
+    SessionRan,
     SessionTimeseries,
 )
 
@@ -253,6 +257,7 @@ def build_session_detail(
 
     by_service: list[ServiceStats] = []
     for (service, host), service_contexts in sorted(per_service.items()):
+
         def drops(key: str, windows: list[dict[str, Any]] = service_contexts) -> int:
             return _cumulative_total(
                 [_int((context.get("drops") or {}).get(key)) for context in windows]
@@ -388,3 +393,92 @@ def build_timeseries(trace_id: str, rows: Sequence[Any]) -> SessionTimeseries:
         ],
         rows_written=[_int(context.get("rows_written")) for context in contexts],
     )
+
+
+#: The two RAN sources (ADR-0010 of mec-cast), by the service they post as.
+RAN_SERVICES = {"mec-cast-ran": "json", "mec-cast-ran-kpm": "kpm"}
+
+
+def _opt_int(value: Any) -> int | None:
+    number = _number(value)
+    return None if number is None else int(number)
+
+
+def _seconds(ns: Any, fallback: datetime) -> float:
+    value = _number(ns)
+    return value / 1e9 if value else fallback.timestamp()
+
+
+def build_ran(trace_id: str, rows: Sequence[Any]) -> SessionRan:
+    """Project RAN entries into per-source columns.
+
+    Each entry is one gNB report (JSON tap) or one KPM indication, carrying
+    its normalised rows in ``context.norm``. Time is the entry's ``recv_ns``,
+    taken on the same clock as the telemetry snapshots, so the radio and the
+    application line up on one axis; the database timestamp is the fallback.
+    A metric absent from a report is null there, never zero.
+    """
+    per_source: dict[str, dict[str, Any]] = {}
+    controls: list[RanControl] = []
+    for row in rows:
+        service = row["service"]
+        source = RAN_SERVICES.get(service)
+        if source is None:
+            continue
+        control = row["control"]
+        if isinstance(control, dict):
+            controls.append(
+                RanControl(
+                    t=_seconds(control.get("ts_ns"), row["timestamp"]),
+                    action=str(control.get("action") or ""),
+                    outcome=str(control.get("outcome") or ""),
+                    ue_id=_opt_int(control.get("ue_id")),
+                    min_prb_ratio=_opt_int(control.get("min_prb_ratio")),
+                    max_prb_ratio=_opt_int(control.get("max_prb_ratio")),
+                    detail=str(control.get("detail") or ""),
+                )
+            )
+        norm = row["norm"]
+        if not isinstance(norm, list) or not norm:
+            continue
+        bucket = per_source.setdefault(
+            source, {"service": service, "t": [], "series": {}, "units": {}}
+        )
+        index = len(bucket["t"])
+        bucket["t"].append(_seconds(row["recv_ns"], row["timestamp"]))
+        for item in norm:
+            if not isinstance(item, dict):
+                continue
+            value = _number(item.get("value"))
+            if value is None:
+                continue
+            key = (str(item.get("ue") or ""), str(item.get("metric") or ""))
+            bucket["series"].setdefault(key, {})[index] = value
+            bucket["units"][key] = str(item.get("unit") or "")
+
+    sources = []
+    for source in ("json", "kpm"):
+        bucket = per_source.get(source)
+        if bucket is None:
+            continue
+        length = len(bucket["t"])
+        series = [
+            RanSeries(
+                ue=ue,
+                metric=metric,
+                unit=bucket["units"][(ue, metric)],
+                values=[points.get(i) for i in range(length)],
+            )
+            for (ue, metric), points in sorted(bucket["series"].items())
+        ]
+        sources.append(
+            RanSource(
+                source=source,
+                service=bucket["service"],
+                t=bucket["t"],
+                ues=sorted({s.ue for s in series if s.ue}),
+                series=series,
+            )
+        )
+    controls.sort(key=lambda c: c.t)
+    return SessionRan(trace_id=trace_id, sources=sources, controls=controls)

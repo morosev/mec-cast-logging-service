@@ -306,3 +306,20 @@ footer {
 .switch input:checked + .track .knob { transform: translateX(18px); }
 .switch input:focus-visible + .track { outline: 2px solid var(--accent, #2E9E7B); outline-offset: 2px; }
 .switch-text { font-size: 12px; color: var(--dim, #76797C); min-width: 68px; }
+
+/* ── radio panel ────────────────────────────────────────────────────── */
+
+.ran-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.ran-controls select { min-width: 160px; }
+.ran-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; margin-top: 8px; }
+.ran-panel h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.ran-none { grid-column: 1 / -1; font-size: 12px; color: var(--text-faint); }
+
+@media (max-width: 1000px) {
+  .ran-grid { grid-template-columns: 1fr; }
+}

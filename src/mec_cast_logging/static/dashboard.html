@@ -108,6 +108,31 @@
       </p>
     </section>
 
+    <!-- radio: the gNB's own view of the same session -->
+    <section class="card hidden" id="ranCard" style="margin-bottom:18px">
+      <div class="ran-head">
+        <h2>Radio (gNB) <span class="badge muted" id="ranBadge"></span></h2>
+        <div class="controls ran-controls">
+          <div class="field">
+            <label for="ranSource">Source</label>
+            <select id="ranSource"></select>
+          </div>
+          <div class="field">
+            <label for="ranUe">UE</label>
+            <select id="ranUe"></select>
+          </div>
+        </div>
+      </div>
+      <div class="ran-grid" id="ranPanels"></div>
+      <p class="hint">
+        Same time axis as glass-to-glass above. <em>Metrics tap</em> is the gNB's JSON
+        export, one point per report; <em>KPM (E2 xApp)</em> is the standard E2SM-KPM
+        subset at 1 s, which fills the throughput panel only. Either appears when that
+        source sent to this service (<code>RAN_LOGGING</code>, <code>KPM_LOGGING</code>).
+        Dashed lines mark PRB-quota controls the gNB answered; red ones it refused.
+      </p>
+    </section>
+
     <!-- budget -->
     <div class="grid-2">
       <section class="card">

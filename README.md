@@ -67,6 +67,7 @@ Base path is `/api/v1`. Health endpoints sit at the root.
 | GET    | `/api/v1/sessions`                         | Measurement sessions in a time window      |
 | GET    | `/api/v1/sessions/{trace_id}`              | Aggregate statistics for one session       |
 | GET    | `/api/v1/sessions/{trace_id}/timeseries`   | Per-window columns for the charts          |
+| GET    | `/api/v1/sessions/{trace_id}/ran`          | The gNB's radio metrics, per RAN source    |
 | GET    | `/dashboard`                               | The web dashboard (see below)              |
 | GET    | `/`                                        | Redirects to `/dashboard`                  |
 | GET    | `/health`                                  | Liveness — does not touch the database     |
@@ -154,7 +155,7 @@ duplicates the way an `OFFSET` would.
 
 `/dashboard` is a plain-file page — no build step, no framework, a vendored
 chart library — served only when the static assets are present. It reads the
-three `/sessions` endpoints and nothing else.
+four `/sessions` endpoints and nothing else.
 
 **Period** selects the window, defaulting to the last 30 days: 24 hours,
 7 days, 30, 90, **All time**, or a custom range. All time is bounded only by
@@ -175,6 +176,26 @@ and marked in the picker, rather than silently showing a different one.
 
 A run absent from *every* period was never recorded rather than aged out:
 components post only when their `LOGGING_URL` is set.
+
+### Radio (gNB)
+
+Below glass-to-glass, on the same time axis, the gNB's view of the session,
+read from `/sessions/{trace_id}/ran`. It comes from mec-cast's two RAN sources,
+each optional and each switched separately on the mec-cast side:
+
+| Source | Service | What it charts |
+|---|---|---|
+| Metrics tap (`ran/collector`, `RAN_LOGGING`) | `mec-cast-ran` | Per report: throughput, MCS and CQI, uplink buffer, HARQ failures, SNR, cell PRBs |
+| KPM (`ran/xapp`, `KPM_LOGGING`) | `mec-cast-ran-kpm` | E2SM-KPM at 1 s: throughput; plus the xApp's PRB-quota controls |
+
+Both post their normalised rows as `context.norm` (`ue`, `metric`, `value`,
+`unit`, mec-cast's `ran/schema/metrics.md`) and their arrival time as
+`context.recv_ns`, on the telemetry clock, which is what lines the radio up
+with the application. The endpoint reads only those two fields and
+`context.control`, never the raw report. A source picker and a UE picker
+choose what is shown; panels a source cannot fill are listed, not drawn empty.
+Control actions the gNB answered are dashed markers, refused ones red. The
+panel is hidden for a session with no RAN entries.
 
 ## Retention
 

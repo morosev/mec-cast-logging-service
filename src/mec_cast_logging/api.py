@@ -20,13 +20,14 @@ from .schemas import (
     LogPage,
     SessionDetail,
     SessionList,
+    SessionRan,
     SessionSummary,
     SessionTimeseries,
     StatsResponse,
     decode_cursor,
     encode_cursor,
 )
-from .sessions import DEFAULT_SLO_NS, build_session_detail, build_timeseries
+from .sessions import DEFAULT_SLO_NS, build_ran, build_session_detail, build_timeseries
 
 health_router = APIRouter(tags=["health"])
 logs_router = APIRouter(tags=["logs"])
@@ -264,6 +265,20 @@ async def session_timeseries(trace_id: str, repository: RepositoryDep) -> Sessio
             detail=f"No telemetry snapshots for session {trace_id!r}.",
         )
     return build_timeseries(trace_id, rows)
+
+
+@sessions_router.get(
+    "/sessions/{trace_id}/ran",
+    response_model=SessionRan,
+    summary="The gNB's radio metrics for one session, per source, shaped for charting",
+)
+async def session_ran(trace_id: str, repository: RepositoryDep) -> SessionRan:
+    """Normalised RAN rows from the metrics tap (``source=json``) and the E2
+    xApp (``source=kpm``), plus the xApp's control actions.
+
+    Never 404: a session with no RAN data answers with empty ``sources``.
+    """
+    return build_ran(trace_id, await repository.session_ran(trace_id))
 
 
 def _as_utc(value: datetime | None) -> datetime | None:

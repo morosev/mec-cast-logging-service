@@ -234,6 +234,28 @@ class LogRepository:
         async with self._pool.acquire() as connection:
             return await connection.fetch(query, trace_id)
 
+    async def session_ran(self, trace_id: str) -> list[asyncpg.Record]:
+        """The RAN entries of one session, oldest first: gNB reports from the
+        metrics tap, KPM indications and control actions from the xApp.
+
+        Only the normalised rows and the control record are fetched. The raw
+        report (``context.kpi``) is the bulk of each entry and the chart has
+        no use for it.
+        """
+        query = """
+            SELECT "timestamp", service,
+                   context->>'recv_ns' AS recv_ns,
+                   context->'norm'     AS norm,
+                   context->'control'  AS control
+            FROM log_entries
+            WHERE trace_id = $1
+              AND service IN ('mec-cast-ran', 'mec-cast-ran-kpm')
+              AND (context ? 'norm' OR context ? 'control')
+            ORDER BY "timestamp" ASC, id ASC
+        """
+        async with self._pool.acquire() as connection:
+            return await connection.fetch(query, trace_id)
+
     async def count_before(self, before: datetime) -> int:
         """Count entries older than ``before``."""
         async with self._pool.acquire() as connection:

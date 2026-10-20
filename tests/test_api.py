@@ -314,3 +314,64 @@ async def test_purge_removes_only_old_entries(
 
 async def test_migrations_are_idempotent(database: Database) -> None:
     assert await database.migrate() == []
+
+
+async def test_session_ran_returns_both_sources_and_controls(client: httpx.AsyncClient) -> None:
+    """What the dashboard's radio panel reads: the collector's and the xApp's
+    entries for one run, as they post them, and nothing from another run."""
+    t0 = int(NOW.timestamp() * 1e9)
+    norm = {"cell": "1", "ue": "17921", "metric": "ue.ul_throughput_bps", "unit": "bit/s"}
+    await seed(
+        client,
+        [
+            entry(
+                service="mec-cast-ran",
+                message="gnb metrics",
+                trace_id="run-ran",
+                context={"recv_ns": t0, "kpi": {"big": "raw"}, "norm": [dict(norm, value=5e6)]},
+            ),
+            entry(
+                service="mec-cast-ran-kpm",
+                message="kpm indication",
+                trace_id="run-ran",
+                context={
+                    "recv_ns": t0 + 10**9,
+                    "norm": [dict(norm, ue="e2:0", value=5.7e6)],
+                },
+            ),
+            entry(
+                service="mec-cast-ran-kpm",
+                message="ran control",
+                trace_id="run-ran",
+                context={
+                    "control": {
+                        "ts_ns": t0,
+                        "action": "apply",
+                        "outcome": "ack",
+                        "ue_id": "0",
+                        "max_prb_ratio": "30",
+                    }
+                },
+            ),
+            entry(
+                service="mec-cast-ran",
+                trace_id="other-run",
+                context={"recv_ns": t0, "norm": [dict(norm, value=1.0)]},
+            ),
+        ],
+    )
+    response = await client.get(f"{PREFIX}/sessions/run-ran/ran")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [s["source"] for s in body["sources"]] == ["json", "kpm"]
+    tap = body["sources"][0]
+    assert tap["t"] == [NOW.timestamp()]
+    assert tap["series"][0]["values"] == [5e6]
+    assert body["sources"][1]["ues"] == ["e2:0"]
+    assert [(c["action"], c["max_prb_ratio"]) for c in body["controls"]] == [("apply", 30)]
+
+
+async def test_session_ran_without_ran_data_is_empty_not_404(client: httpx.AsyncClient) -> None:
+    response = await client.get(f"{PREFIX}/sessions/no-such-run/ran")
+    assert response.status_code == 200
+    assert response.json() == {"trace_id": "no-such-run", "sources": [], "controls": []}

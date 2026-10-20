@@ -14,7 +14,7 @@
 const API = '/api/v1';
 const $ = (id) => document.getElementById(id);
 
-const state = { sessions: [], detail: null, series: null, charts: [] };
+const state = { sessions: [], detail: null, series: null, ran: null, charts: [], ranSource: null, ranUe: null };
 
 /* ── formatting ─────────────────────────────────────────────────────── */
 
@@ -149,12 +149,21 @@ async function loadSessions() {
 
 async function loadSession(traceId) {
   const slo = $('slo').value;
-  const [detail, series] = await Promise.all([
-    getJSON(`${API}/sessions/${encodeURIComponent(traceId)}?slo_ms=${slo}`),
-    getJSON(`${API}/sessions/${encodeURIComponent(traceId)}/timeseries`),
+  const id = encodeURIComponent(traceId);
+  const [detail, series, ran] = await Promise.all([
+    getJSON(`${API}/sessions/${id}?slo_ms=${slo}`),
+    getJSON(`${API}/sessions/${id}/timeseries`),
+    // The radio panel is optional: an older service without the endpoint,
+    // or a run with no gNB, must not take the rest of the page down with it.
+    getJSON(`${API}/sessions/${id}/ran`).catch(() => null),
   ]);
+  if (!state.detail || state.detail.trace_id !== traceId) {
+    state.ranSource = null;
+    state.ranUe = null;
+  }
   state.detail = detail;
   state.series = series;
+  state.ran = ran;
   render();
 }
 
@@ -686,6 +695,145 @@ function fillShame(series) {
     : `<tr><td colspan="7" class="dim">No glass-to-glass readings in this session.</td></tr>`;
 }
 
+/* ── radio (gNB) ────────────────────────────────────────────────────────
+   The gNB's view of the same session, from whichever RAN source logged it:
+   the metrics tap (`mec-cast-ran`, rich, per report) or the E2 xApp
+   (`mec-cast-ran-kpm`, the KPM subset, 1 s). Metric names are the canonical
+   ones of mec-cast's ran/schema/metrics.md. */
+
+const RAN_SOURCES = { json: 'Metrics tap', kpm: 'KPM (E2 xApp)' };
+
+//: Each panel: canonical metrics for the chosen UE (or the cell), one unit.
+const RAN_PANELS = [
+  { title: 'Throughput', unit: 'Mbit/s', scale: 1e-6,
+    metrics: [['ue.ul_throughput_bps', 'uplink', '--accent'], ['ue.dl_throughput_bps', 'downlink', '--blue']] },
+  { title: 'MCS and CQI', unit: 'index',
+    metrics: [['ue.ul_mcs', 'UL MCS', '--accent'], ['ue.dl_mcs', 'DL MCS', '--blue'], ['ue.cqi', 'CQI', '--violet']] },
+  { title: 'Uplink buffer (BSR)', unit: 'kB', scale: 1e-3,
+    metrics: [['ue.ul_bsr_bytes', 'UL BSR', '--amber'], ['ue.dl_buffer_bytes', 'DL buffer', '--blue']] },
+  { title: 'HARQ failures per report', unit: 'count',
+    metrics: [['ue.ul_harq_nok', 'UL nok', '--rose'], ['ue.dl_harq_nok', 'DL nok', '--amber']] },
+  { title: 'Signal', unit: 'dB',
+    metrics: [['ue.pusch_snr_db', 'PUSCH SNR', '--accent'], ['ue.pucch_snr_db', 'PUCCH SNR', '--violet']] },
+  { title: 'Cell PRBs used', unit: 'PRB', cell: true,
+    metrics: [['cell.pusch_prbs_used_mean', 'PUSCH', '--accent'], ['cell.pdsch_prbs_used_mean', 'PDSCH', '--blue']] },
+];
+
+function fillSelect(select, options, chosen) {
+  select.innerHTML = options
+    .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
+    .join('');
+  select.value = chosen;
+}
+
+/** Vertical markers for the xApp's control actions, labelled with the cap. */
+function controlMarkers(controls, origin) {
+  return (chart) => {
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1.2;
+    ctx.font = `10px ${css('--mono')}`;
+    for (const c of controls) {
+      const x = chart.valToPos(c.t - origin, 'x', true);
+      if (!Number.isFinite(x) || x < chart.bbox.left || x > chart.bbox.left + chart.bbox.width) continue;
+      const refused = c.outcome === 'failed';
+      ctx.strokeStyle = refused ? css('--rose') : css('--text-faint');
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.beginPath();
+      ctx.moveTo(x, chart.bbox.top);
+      ctx.lineTo(x, chart.bbox.top + chart.bbox.height);
+      ctx.stroke();
+      ctx.fillText(`${c.action} ${c.max_prb_ratio ?? ''}%`, x + 3, chart.bbox.top + 10);
+    }
+    ctx.restore();
+  };
+}
+
+/** The panel's metrics this source reported for this UE, with data. */
+function ranPicks(panel, source, ue) {
+  const key = panel.cell ? '' : ue;
+  return panel.metrics
+    .map(([metric, label, color]) => ({
+      label, color,
+      series: source.series.find((s) => s.metric === metric && s.ue === key),
+    }))
+    .filter((p) => p.series && p.series.values.some((v) => v !== null));
+}
+
+function drawRanPanel(target, panel, picked, source, origin, controls) {
+  const scale = panel.scale || 1;
+  const fmt = (v) => (v === null || v === undefined ? '—'
+    : `${(Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2))} ${panel.unit}`);
+  const options = {
+    ...chartSize(target, 180),
+    scales: { x: { time: false }, y: {} },
+    legend: { live: true },
+    cursor: { drag: { x: true, y: false } },
+    axes: [elapsedAxis(), { ...msAxis(panel.unit), scale: 'y' }],
+    series: [
+      { label: 'elapsed', value: (_, v) => clock(v) },
+      ...picked.map((p) => ({ label: p.label, scale: 'y', stroke: css(p.color), width: 1.6,
+        spanGaps: false, value: (_, v) => fmt(v) })),
+    ],
+    hooks: { draw: [controlMarkers(controls, origin)] },
+  };
+  const data = [
+    source.t.map((t) => t - origin),
+    ...picked.map((p) => p.series.values.map((v) => (v === null ? null : v * scale))),
+  ];
+  state.charts.push(new uPlot(options, data, target));
+}
+
+function drawRan(ran, origin) {
+  const card = $('ranCard');
+  if (!ran || !ran.sources.length) {
+    card.classList.add('hidden');
+    return;
+  }
+  card.classList.remove('hidden');
+  const zero = origin ?? ran.sources[0].t[0] ?? 0;
+
+  const available = ran.sources.map((s) => s.source);
+  if (!available.includes(state.ranSource)) state.ranSource = available[0];
+  fillSelect($('ranSource'), ran.sources.map((s) => [s.source, RAN_SOURCES[s.source] || s.source]),
+    state.ranSource);
+  const source = ran.sources.find((s) => s.source === state.ranSource);
+
+  if (!source.ues.includes(state.ranUe)) state.ranUe = source.ues[0] ?? '';
+  const ueLabel = (ue) => (ue.startsWith('e2:') ? `E2 UE ${ue.slice(3)}` : `RNTI ${ue}`);
+  fillSelect($('ranUe'), source.ues.length ? source.ues.map((u) => [u, ueLabel(u)]) : [['', 'cell only']],
+    state.ranUe);
+
+  // One marker per control: the gNB's answer (ack or failed). The `sent` row
+  // before it lands a few ms earlier and would only draw a double line.
+  const answered = ran.controls.filter((c) => c.outcome !== 'sent');
+  const sent = answered.length;
+  const refused = answered.filter((c) => c.outcome === 'failed').length;
+  const badge = $('ranBadge');
+  badge.textContent = `${source.t.length} reports · ${source.ues.length} UE` +
+    (source.ues.length === 1 ? '' : 's') +
+    (sent ? ` · ${sent} control${sent === 1 ? '' : 's'}${refused ? `, ${refused} refused` : ''}` : '');
+  badge.className = `badge ${refused ? 'bad' : 'muted'}`;
+
+  // Only panels this source can fill. KPM carries throughput and RLC volume,
+  // nothing else here, and five empty frames would read as a fault.
+  const shown = RAN_PANELS
+    .map((panel) => ({ panel, picked: ranPicks(panel, source, state.ranUe) }))
+    .filter((p) => p.picked.length);
+  const missing = RAN_PANELS.filter((p) => !shown.some((s) => s.panel === p)).map((p) => p.title);
+  const grid = $('ranPanels');
+  grid.innerHTML = shown.map((p, i) =>
+    `<div class="ran-panel"><h3>${escapeHtml(p.panel.title)}</h3><div class="chart" id="ranPanel${i}"></div></div>`)
+    .join('') +
+    (missing.length
+      ? `<div class="ran-none">Not reported by the ${escapeHtml(RAN_SOURCES[source.source] || source.source)} ` +
+        `source: ${missing.map(escapeHtml).join(', ')}.</div>`
+      : '');
+  shown.forEach((p, i) =>
+    drawRanPanel($(`ranPanel${i}`), p.panel, p.picked, source, zero, answered));
+}
+
 /* ── render ─────────────────────────────────────────────────────────── */
 
 function render() {
@@ -765,6 +913,7 @@ function render() {
   fillMetrics(detail);
   fillServices(detail);
   fillShame(primary);
+  drawRan(state.ran, series.t.length ? series.t[0] : null);
 }
 
 /* ── wiring ─────────────────────────────────────────────────────────── */
@@ -846,6 +995,17 @@ $('session').addEventListener('change', async (event) => {
   } catch (err) {
     showError(`Could not load session: ${err.message}`);
   }
+});
+
+$('ranSource').addEventListener('change', (event) => {
+  state.ranSource = event.target.value;
+  state.ranUe = null;
+  if (state.detail) render();
+});
+
+$('ranUe').addEventListener('change', (event) => {
+  state.ranUe = event.target.value;
+  if (state.detail) render();
 });
 
 $('slo').addEventListener('change', () => {

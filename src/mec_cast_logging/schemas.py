@@ -325,3 +325,46 @@ def decode_cursor(cursor: str) -> tuple[datetime, int]:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
     return timestamp, entry_id
+
+
+class RanSeries(BaseModel):
+    """One normalised RAN metric for one UE (or the cell), aligned with ``t``."""
+
+    ue: str = Field(description='RNTI (JSON tap), "e2:<id>" (KPM), or "" for a cell row.')
+    metric: str = Field(description="Canonical name from ran/schema/metrics.md, e.g. ue.ul_mcs.")
+    unit: str
+    values: list[float | None] = Field(description="Same length as the source's ``t``.")
+
+
+class RanSource(BaseModel):
+    """Everything one RAN source reported for a session."""
+
+    source: str = Field(description="json (the gNB metrics tap) or kpm (the E2 xApp).")
+    service: str
+    t: list[float] = Field(description="Unix seconds per report, on the telemetry clock.")
+    ues: list[str] = Field(description="UEs seen, cell rows excluded.")
+    series: list[RanSeries]
+
+
+class RanControl(BaseModel):
+    """One RAN control action the xApp recorded (ADR-0011)."""
+
+    t: float = Field(description="Unix seconds.")
+    action: str
+    outcome: str
+    ue_id: int | None = None
+    min_prb_ratio: int | None = None
+    max_prb_ratio: int | None = None
+    detail: str = ""
+
+
+class SessionRan(BaseModel):
+    """The radio side of a session, shaped for charting.
+
+    Empty ``sources`` is an ordinary answer: a run with no gNB, or one whose
+    RAN sources had logging switched off, has telemetry and nothing else.
+    """
+
+    trace_id: str
+    sources: list[RanSource]
+    controls: list[RanControl]
