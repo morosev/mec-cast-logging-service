@@ -228,10 +228,15 @@ async def test_trace_id_filter(client: httpx.AsyncClient) -> None:
     assert body["count"] == 2
 
 
-async def test_cursor_pagination_walks_every_row_once(client: httpx.AsyncClient) -> None:
+async def test_cursor_pagination_walks_every_row_once(
+    client: httpx.AsyncClient, settings: Settings
+) -> None:
     # All entries share a timestamp, so paging must fall back to the id tiebreaker.
     total = 12
-    await seed(client, [entry(message=f"row {i}") for i in range(total)])
+    rows = [entry(message=f"row {i}") for i in range(total)]
+    # More rows than one batch may carry, so seed within the ingest limit.
+    for start in range(0, total, settings.max_batch_size):
+        await seed(client, rows[start : start + settings.max_batch_size])
 
     seen: list[str] = []
     cursor: str | None = None
