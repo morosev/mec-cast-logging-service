@@ -778,11 +778,39 @@ function drawRanPanel(target, panel, picked, source, origin, controls) {
     ],
     hooks: { draw: [controlMarkers(controls, origin)] },
   };
-  const data = [
-    source.t.map((t) => t - origin),
-    ...picked.map((p) => p.series.values.map((v) => (v === null ? null : v * scale))),
-  ];
-  state.charts.push(new uPlot(options, data, target));
+  state.charts.push(new uPlot(options, panelData(picked, source, origin, scale), target));
+}
+
+/** One panel's columns, on only the time points where it has values.
+ *
+ *  A source's time axis is the union of every message it logged. OCUDU sends
+ *  the scheduler, RLC and DU-MAC metrics as separate messages, so a per-UE
+ *  throughput reading sits between two points that carry only RLC or MAC
+ *  rows. Plotted on the shared axis every reading was isolated by nulls --
+ *  a zero-length segment, nothing drawn. Points where none of this panel's
+ *  metrics reported are dropped instead; a real outage, a gap of more than
+ *  three report periods, is kept as a break in the line. */
+function panelData(picked, source, origin, scale) {
+  const keep = source.t
+    .map((_, i) => i)
+    .filter((i) => picked.some((p) => p.series.values[i] !== null));
+  const xs = keep.map((i) => source.t[i] - origin);
+  const steps = xs.slice(1).map((x, i) => x - xs[i]).filter((d) => d > 0).sort((a, b) => a - b);
+  const period = steps.length ? steps[Math.floor(steps.length / 2)] : 0;
+  const x = [];
+  const ys = picked.map(() => []);
+  keep.forEach((i, k) => {
+    if (k > 0 && period > 0 && xs[k] - xs[k - 1] > 3 * period) {
+      x.push((xs[k] + xs[k - 1]) / 2);              // break the line here
+      ys.forEach((y) => y.push(null));
+    }
+    x.push(xs[k]);
+    picked.forEach((p, j) => {
+      const v = p.series.values[i];
+      ys[j].push(v === null ? null : v * scale);
+    });
+  });
+  return [x, ...ys];
 }
 
 function drawRan(ran, origin) {
@@ -801,7 +829,10 @@ function drawRan(ran, origin) {
   const source = ran.sources.find((s) => s.source === state.ranSource);
 
   if (!source.ues.includes(state.ranUe)) state.ranUe = source.ues[0] ?? '';
-  const ueLabel = (ue) => (ue.startsWith('e2:') ? `E2 UE ${ue.slice(3)}` : `RNTI ${ue}`);
+  // du-ue:<n> is an RLC row that arrived before any scheduler report named
+  // the UE's RNTI (mec-cast's ran/schema/metrics.md).
+  const ueLabel = (ue) => (ue.startsWith('e2:') ? `E2 UE ${ue.slice(3)}`
+    : ue.startsWith('du-ue:') ? `DU UE ${ue.slice(6)} (no RNTI yet)` : `RNTI ${ue}`);
   fillSelect($('ranUe'), source.ues.length ? source.ues.map((u) => [u, ueLabel(u)]) : [['', 'cell only']],
     state.ranUe);
 
